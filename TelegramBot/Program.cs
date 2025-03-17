@@ -41,7 +41,7 @@ class Program
             long Id = update.Message.Chat.Id;
             Console.WriteLine($"Получено сообщение от {Id}");
             await bot.SendMessage(Id, "Извини, я понимаю только текстовые сообщения :(", cancellationToken: token);
-
+            
             return;
         }
 
@@ -69,15 +69,20 @@ class Program
                 break;
 
             case "/help":
-                await bot.SendMessage(chatId, "Доступные команды:\n/start - Запуск бота\n/help - Помощь\n/addPlan <текст> - Добавить план", cancellationToken: token);
+                await bot.SendMessage(chatId, "Доступные команды:" +
+                    "\n/start - Запуск бота" +
+                    "\n/help - Помощь" +
+                    "\n/addplan - Добавить план" +
+                    "\n/myplan - Посмотреть мои планы", cancellationToken: token);
                 break;
 
             case "/addplan":
-                await bot.SendMessage(chatId, "Чтобы добавить план, напиши команду так:\n/addPlan Покупка продуктов", cancellationToken: token);
-                break;
+                await bot.SendMessage(chatId, "Добавление планов еще в разработке, пока что держите их у себя в голове или на листочке...", cancellationToken: token);
+                break; //Чтобы добавить план, напиши команду так:\n/addPlan Покупка продуктов
 
             case "/myplans":
-                await bot.SendMessage(chatId, "Твои планы:", cancellationToken: token);
+                await bot.SendMessage(chatId, "Твои планы: " +
+                    "\n Пока пусто, скоро будут, обещаю", cancellationToken: token);
                 break;
 
             default:
