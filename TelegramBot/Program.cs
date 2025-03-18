@@ -1,5 +1,7 @@
-﻿using System;
+﻿using Microsoft.Extensions.Primitives;
+using System;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Telegram.Bot;
@@ -9,6 +11,8 @@ using Telegram.Bot.Types.Enums;
 
 class Program
 {
+    private static readonly Dictionary<long, (string? text, bool waitingForDate)> userPlanState = new();
+
     static string GetTokenFromFile()
     {
         string filePath = Path.Combine(AppContext.BaseDirectory, ".telegram_bot_token");
@@ -50,13 +54,36 @@ class Program
 
         Console.WriteLine($"Получено сообщение: {messageText} от {chatId}");
 
-        if (messageText.StartsWith("/"))
+        if (userPlanState.TryGetValue(chatId, out var state)) // проверка статуса пользователя
+        {
+            if (!state.waitingForDate) //получение текста плана
+            {
+                userPlanState[chatId] = (messageText, true);
+                await bot.SendMessage(chatId, $"📅 Теперь введи дату и время (формат: дд.мм.гггг 14:30) или просто дату:", cancellationToken: token);
+                return;
+            }
+            else
+            {
+                if (DateTime.TryParse(messageText, out DateTime planDateTime)) // получение даты плана 
+                {
+                    await SavePlan(chatId, state.text, planDateTime);
+                    await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
+                    userPlanState.Remove(chatId);
+                }
+                else
+                {
+                    await bot.SendMessage(chatId, "Неправильный формат даты. Попробуй снова в формате дд.мм.гггг 14:30", cancellationToken: token);
+                }
+            }
+        }
+
+        if (messageText.StartsWith("/")) // работа с командами
         {
             await HandleCommandAsync(bot, chatId, messageText, token);
         }
         else
         {
-            await bot.SendMessage(chatId, $"Ты написал: {messageText}", cancellationToken: token);
+            await bot.SendMessage(chatId, $"К сожалению, я не смогу поддержать диалог с тобой :(", cancellationToken: token);
         }
     }
 
@@ -73,16 +100,16 @@ class Program
                     "\n/start - Запуск бота" +
                     "\n/help - Помощь" +
                     "\n/addplan - Добавить план" +
-                    "\n/myplan - Посмотреть мои планы", cancellationToken: token);
+                    "\n/myplans - Посмотреть мои планы", cancellationToken: token);
                 break;
 
             case "/addplan":
-                await bot.SendMessage(chatId, "Добавление планов еще в разработке, пока что держите их у себя в голове или на листочке...", cancellationToken: token);
-                break; //Чтобы добавить план, напиши команду так:\n/addPlan Покупка продуктов
+                userPlanState[chatId] = (null, false);
+                await bot.SendMessage(chatId, "📝 Напиши свой план", cancellationToken: token);
+                break;
 
             case "/myplans":
-                await bot.SendMessage(chatId, "Твои планы: " +
-                    "\n Пока пусто, скоро будут, обещаю", cancellationToken: token);
+                await GetAllPlans(bot, chatId, token); // чтение с базы данных
                 break;
 
             default:
@@ -90,6 +117,27 @@ class Program
                 break;
         }
     }
+
+    static async Task SavePlan(long chatId, string planText, DateTime planDateTime)
+    {
+
+
+        Console.WriteLine($"[LOG] Сохранили план от {chatId}: {planText} на {planDateTime}");
+
+        //await Reminder(bot) // добавить напоминание 
+        await Task.CompletedTask;
+    }
+
+    static async Task GetAllPlans(ITelegramBotClient bot, long chatId, CancellationToken token)
+    {
+        String plans = "Твои планы: \n";
+
+        // чтение с базы данных
+
+        await bot.SendMessage(chatId, plans, cancellationToken: token);
+    }
+
+    //async Task Reminder(ITelegramBotClient bot) {}
 
     static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken token)
     {
