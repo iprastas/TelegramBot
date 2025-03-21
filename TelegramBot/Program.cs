@@ -169,6 +169,7 @@ class Program
                 plansCount = counter.GetInt32(0);
         }
         cnt.Dispose();
+        conn.Close();
 
         if (plansCount == 0)
         {
@@ -177,7 +178,8 @@ class Program
         }
 
         String plans = "Твои планы: \n";
-        
+
+        conn.Open();
         NpgsqlCommand cmd = conn.CreateCommand();
         cmd.CommandText = $"select plan_date, plan_text from public.plans where user_id = {chatId};";
 
