@@ -8,16 +8,15 @@ using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
+using System.Globalization;
+using static TelegramBot.Services;
+using Microsoft.Extensions.DependencyInjection;
+using System.Numerics;
+using Npgsql;
 
 class Program
 {
     private static readonly Dictionary<long, (string? text, bool waitingForDate)> userPlanState = new();
-
-    static string GetTokenFromFile()
-    {
-        string filePath = Path.Combine(AppContext.BaseDirectory, ".telegram_bot_token");
-        return File.Exists(filePath) ? File.ReadAllText(filePath).Trim() : throw new Exception("Файл с токеном не найден!"); ;
-    }
 
     static async Task Main()
     {
@@ -64,15 +63,25 @@ class Program
             }
             else
             {
-                if (DateTime.TryParse(messageText, out DateTime planDateTime)) // получение даты плана 
+                if (DateTime.TryParseExact(messageText, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime planDateTime)) // получение даты плана 
                 {
-                    await SavePlan(chatId, state.text, planDateTime);
-                    await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
-                    userPlanState.Remove(chatId);
+                    if (SavePlan(chatId, state.text, planDateTime))
+                    {
+                        await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
+                        userPlanState.Remove(chatId);
+                        return;
+                    }
+                    else
+                    {
+                        await bot.SendMessage(chatId, $"Произошла ошибка, план не сохранен. Попробуйте использовать команду заново.", cancellationToken: token);
+                        userPlanState.Remove(chatId);
+                        return;
+                    }
                 }
                 else
                 {
                     await bot.SendMessage(chatId, "Неправильный формат даты. Попробуй снова в формате дд.мм.гггг 14:30", cancellationToken: token);
+                    return;
                 }
             }
         }
@@ -118,21 +127,70 @@ class Program
         }
     }
 
-    static async Task SavePlan(long chatId, string planText, DateTime planDateTime)
+    static bool SavePlan(long chatId, string planText, DateTime planDateTime)
     {
+        using NpgsqlConnection conn = new(GetConnectionString());
+        conn.Open();
+        NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = $"insert into public.plans(user_id, plan_text, plan_date) values({chatId}, \'{planText}\', \'{planDateTime}\');";
 
+        try
+        {
+            cmd.ExecuteNonQuery();
 
-        Console.WriteLine($"[LOG] Сохранили план от {chatId}: {planText} на {planDateTime}");
+            cmd.Dispose();
+            conn.Close();
 
-        //await Reminder(bot) // добавить напоминание 
-        await Task.CompletedTask;
+            Console.WriteLine($"[LOG] Сохранили план от {chatId}: {planText} на {planDateTime}");
+
+            //await Reminder(bot) // добавить напоминание 
+            return true;
+        }
+        catch (Exception ex) 
+        {
+            Console.WriteLine($"[LOG] Не смогли сохранить план от {chatId} по причине: {ex}");
+            return false;
+        }
     }
 
     static async Task GetAllPlans(ITelegramBotClient bot, long chatId, CancellationToken token)
     {
-        String plans = "Твои планы: \n";
+        using NpgsqlConnection conn = new(GetConnectionString());
+        conn.Open();
 
-        // чтение с базы данных
+        NpgsqlCommand cnt = conn.CreateCommand(); 
+        cnt.CommandText = $"SELECT count(*) FROM public.plans where user_id = {chatId}";
+        int plansCount = 0;
+
+        NpgsqlDataReader counter = cnt.ExecuteReader();
+        while (counter.Read())
+        {
+            if (!counter.IsDBNull(0))
+                plansCount = counter.GetInt32(0);
+        }
+        cnt.Dispose();
+
+        if (plansCount == 0)
+        {
+            await bot.SendMessage(chatId, "Планов еще нет. Самое время их записать!", cancellationToken: token);
+            return;
+        }
+
+        String plans = "Твои планы: \n";
+        
+        NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = $"select plan_date, plan_text from public.plans where user_id = {chatId};";
+
+        NpgsqlDataReader reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (!reader.IsDBNull(0))
+                plans += reader.GetDateTime(0) + " ";
+            if (!reader.IsDBNull(1))
+                plans += reader.GetString(1) + "\n";
+        }
+        cmd.Dispose();
+        conn.Close();
 
         await bot.SendMessage(chatId, plans, cancellationToken: token);
     }
