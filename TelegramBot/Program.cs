@@ -1,22 +1,16 @@
-﻿using Microsoft.Extensions.Primitives;
-using System;
-using System.IO;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using Npgsql;
+using System.Globalization;
 using Telegram.Bot;
 using Telegram.Bot.Polling;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
-using System.Globalization;
 using static TelegramBot.Services;
-using Microsoft.Extensions.DependencyInjection;
-using System.Numerics;
-using Npgsql;
-
+using TelegramBot;
 class Program
 {
-    private static readonly Dictionary<long, (string? text, bool waitingForDate)> userPlanState = new();
+    private static readonly Dictionary<long, (string? text, bool waitingForDate)> userPlanState = new(); // Хранит статус ожидания даты плана
+    private static Dictionary<long, bool> waitingForPlanDeletion = new(); // Хранит статус ожидания номера плана
+    private static Dictionary<long, List<Plan>> userActivePlans = new();  // Хранит список активных планов
 
     static async Task Main()
     {
@@ -69,6 +63,8 @@ class Program
                     {
                         await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
                         userPlanState.Remove(chatId);
+
+                        await Reminder(bot); // добавить напоминание 
                         return;
                     }
                     else
@@ -83,6 +79,32 @@ class Program
                     await bot.SendMessage(chatId, "Неправильный формат даты. Попробуй снова в формате дд.мм.гггг 14:30", cancellationToken: token);
                     return;
                 }
+            }
+        }
+        if (waitingForPlanDeletion.TryGetValue(chatId, out bool waiting) && waiting)
+        {
+            if (int.TryParse(messageText, out int planIndex) && planIndex > 0 && userActivePlans.TryGetValue(chatId, out var planList) && planIndex <= planList.Count())
+            {
+                var planToDelete = planList[planIndex - 1];
+                if (DeletePlan(chatId, planToDelete))
+                {
+                    await bot.SendMessage(chatId, $"✅ План удален.", cancellationToken: token);
+                    waitingForPlanDeletion.Remove(chatId);
+                    userActivePlans.Remove(chatId);
+
+                    return;
+                }
+                else
+                {
+                    await bot.SendMessage(chatId, $"Произошла ошибка, план не удален. Попробуйте использовать команду заново.", cancellationToken: token);
+                    userPlanState.Remove(chatId);
+                    return;
+                }
+            }
+            else
+            {
+                await bot.SendMessage(chatId, "Неправильный формат. Попробуй снова отправить номер.", cancellationToken: token);
+                return;
             }
         }
 
@@ -109,6 +131,7 @@ class Program
                     "\n/start - Запуск бота" +
                     "\n/help - Помощь" +
                     "\n/addplan - Добавить план" +
+                    "\n/deleteplan - Удалить план" +
                     "\n/myplans - Посмотреть мои планы", cancellationToken: token);
                 break;
 
@@ -118,7 +141,14 @@ class Program
                 break;
 
             case "/myplans":
-                await GetAllPlans(bot, chatId, token); // чтение с базы данных
+                await GetAllPlans(bot, chatId, token);
+                break;
+
+            case "/deleteplan":
+                waitingForPlanDeletion[chatId] = true;
+
+                await GetAllPlans(bot, chatId, token);
+                await bot.SendMessage(chatId, "\n✏ Введите номер плана для удаления:", cancellationToken: token);
                 break;
 
             default:
@@ -143,7 +173,6 @@ class Program
 
             Console.WriteLine($"[LOG] Сохранили план от {chatId}: {planText} на {planDateTime}");
 
-            //await Reminder(bot) // добавить напоминание 
             return true;
         }
         catch (Exception ex) 
@@ -159,7 +188,7 @@ class Program
         conn.Open();
 
         NpgsqlCommand cnt = conn.CreateCommand(); 
-        cnt.CommandText = $"SELECT count(*) FROM public.plans where user_id = {chatId}";
+        cnt.CommandText = $"SELECT count(*) FROM public.plans where user_id = {chatId} "; //and plan_date>=current_timestamp
         int plansCount = 0;
 
         NpgsqlDataReader counter = cnt.ExecuteReader();
@@ -173,31 +202,79 @@ class Program
 
         if (plansCount == 0)
         {
-            await bot.SendMessage(chatId, "Планов еще нет. Самое время их записать!", cancellationToken: token);
+            if (waitingForPlanDeletion[chatId])
+            {
+                await bot.SendMessage(chatId, "У вас нет актуальных планов для удаления.", cancellationToken: token);
+                waitingForPlanDeletion.Remove(chatId);
+            }
+            else
+            {
+                await bot.SendMessage(chatId, "Актуальных планов еще нет. Самое время их записать!", cancellationToken: token);
+            }
             return;
         }
-
+        
         String plans = "Твои планы: \n";
+        int ind = 1;
+        List<Plan> PlanList = new();
 
         conn.Open();
         NpgsqlCommand cmd = conn.CreateCommand();
-        cmd.CommandText = $"select plan_date, plan_text from public.plans where user_id = {chatId};";
+        cmd.CommandText = $"select id, plan_date, plan_text from public.plans where user_id = {chatId};"; // and plan_date>=current_timestamp
 
         NpgsqlDataReader reader = cmd.ExecuteReader();
         while (reader.Read())
         {
+            Plan plan = new Plan();
             if (!reader.IsDBNull(0))
-                plans += reader.GetDateTime(0) + " ";
+                plan.Id = reader.GetInt32(0);
             if (!reader.IsDBNull(1))
-                plans += reader.GetString(1) + "\n";
+                plan.DateTimePlan = reader.GetDateTime(1);
+            if (!reader.IsDBNull(2))
+                plan.TextPlan = reader.GetString(2);
+
+            plans += $"{ind}. {plan.DateTimePlan} - {plan.TextPlan}. \n";
+            PlanList.Add(plan);
+            ind++;
         }
+        userActivePlans[chatId] = PlanList;
+
         cmd.Dispose();
         conn.Close();
 
         await bot.SendMessage(chatId, plans, cancellationToken: token);
     }
 
-    //async Task Reminder(ITelegramBotClient bot) {}
+    static bool DeletePlan(long chatId, Plan plan)
+    {
+        using NpgsqlConnection conn = new(GetConnectionString());
+        conn.Open();
+        NpgsqlCommand cmd = conn.CreateCommand();
+        cmd.CommandText = $"delete from public.plans where id = {plan.Id};";
+
+        try
+        {
+            cmd.ExecuteNonQuery();
+
+            cmd.Dispose();
+            conn.Close();
+
+            Console.WriteLine($"[LOG] Удалили план от {chatId}\n\n");
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[LOG] Не смогли удалить план от {chatId} по причине: {ex}\n\n");
+            return false;
+        }
+    }
+
+    static async Task Reminder(ITelegramBotClient bot) 
+    {
+
+        await Task.Delay(TimeSpan.FromMinutes(1));
+    }
 
     static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken token)
     {
