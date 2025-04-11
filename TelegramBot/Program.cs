@@ -6,6 +6,7 @@ using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using static TelegramBot.Services;
 using TelegramBot;
+using Telegram.Bot.Types.ReplyMarkups;
 class Program
 {
     private static readonly Dictionary<long, (string? text, bool waitingForDate)> userPlanState = new(); // Хранит статус ожидания даты плана
@@ -22,7 +23,12 @@ class Program
         botClient.StartReceiving(
             HandleUpdateAsync,
             HandleErrorAsync,
-            new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() },
+            new ReceiverOptions { 
+                AllowedUpdates = new[] {
+                    UpdateType.Message,
+                    UpdateType.CallbackQuery // Inline кнопки
+                }
+            },
             cts.Token
         );
 
@@ -33,89 +39,169 @@ class Program
 
     static async Task HandleUpdateAsync(ITelegramBotClient bot, Update update, CancellationToken token)
     {
-        if (update.Message is not { } message || message.Text is not { }) 
+        try
         {
-            long Id = update.Message.Chat.Id;
-            Console.WriteLine($"Получено сообщение от {Id}");
-            await bot.SendMessage(Id, "Извини, я понимаю только текстовые сообщения :(", cancellationToken: token);
-            
-            return;
-        }
-
-        long chatId = message.Chat.Id;
-        string messageText = message.Text;
-
-        Console.WriteLine($"Получено сообщение: {messageText} от {chatId}");
-
-        if (userPlanState.TryGetValue(chatId, out var state)) // проверка статуса пользователя
-        {
-            if (!state.waitingForDate) //получение текста плана
+            switch (update.Type) 
             {
-                userPlanState[chatId] = (messageText, true);
-                await bot.SendMessage(chatId, $"📅 Теперь введи дату и время (формат: дд.мм.гггг 14:30) или просто дату:", cancellationToken: token);
-                return;
-            }
-            else
-            {
-                if (DateTime.TryParseExact(messageText, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime planDateTime)) // получение даты плана 
-                {
-                    if (SavePlan(chatId, state.text, planDateTime))
+                case UpdateType.Message:
                     {
-                        await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
-                        userPlanState.Remove(chatId);
+                        if (update.Message is not { } message || message.Text is not { })
+                        {
+                            long Id = update.Message.Chat.Id;
+                            Console.WriteLine($"Получено сообщение от {Id}");
+                            await bot.SendMessage(Id, "Извини, я понимаю только текстовые сообщения :(", cancellationToken: token);
 
-                        await Reminder(bot); // добавить напоминание 
+                            return;
+                        }
+
+                        long chatId = message.Chat.Id;
+                        string usname = update.Message.Chat.Username;
+                        string messageText = message.Text;
+
+                        Console.WriteLine($"[LOG] Получено сообщение: {messageText} от {usname}({chatId})");
+
+                        if (userPlanState.TryGetValue(chatId, out var state)) // проверка статуса пользователя на ожидание получения плана
+                        {
+                            if (!state.waitingForDate) //получение текста плана
+                            {
+                                userPlanState[chatId] = (messageText, true);
+                                await bot.SendMessage(chatId, $"📅 Теперь введи дату и время (формат: дд.мм.гггг 14:30) или просто дату:", cancellationToken: token);
+                                return;
+                            }
+                            else // получение даты
+                            {
+                                if (DateTime.TryParseExact(messageText, "dd.MM.yyyy HH:mm", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime planDateTime)) // получение даты плана 
+                                {
+                                    if (SavePlan(chatId, state.text, planDateTime))
+                                    {
+                                        await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
+                                        userPlanState.Remove(chatId);
+
+                                        await Reminder(bot); // добавить напоминание 
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        await bot.SendMessage(chatId, $"Произошла ошибка, план не сохранен. Попробуйте использовать команду заново.", cancellationToken: token);
+                                        userPlanState.Remove(chatId);
+                                        return;
+                                    }
+                                }
+                                else
+                                {
+                                    await bot.SendMessage(chatId, "Неправильный формат даты. Попробуй снова в формате дд.мм.гггг 14:30", cancellationToken: token);
+                                    return;
+                                }
+                            }
+                        }
+                        if (waitingForPlanDeletion.TryGetValue(chatId, out bool waiting) && waiting) // проверка статуса пользователя на ожидание удаления плана
+                        {
+                            if (int.TryParse(messageText, out int planIndex) && planIndex > 0 && userActivePlans.TryGetValue(chatId, out var planList) && planIndex <= planList.Count())
+                            {
+                                var planToDelete = planList[planIndex - 1];
+
+                                await bot.SendMessage(chatId, $"Подтвердите удаление плана:", cancellationToken: token);
+                                var inlineKeyboard = new InlineKeyboardMarkup( // inline клавиатура
+                                    new List<InlineKeyboardButton[]>()
+                                    {
+                                        new InlineKeyboardButton[]
+                                        {
+                                            InlineKeyboardButton.WithCallbackData("Удалить", "deleteplan"),
+                                            InlineKeyboardButton.WithCallbackData("Изменить номер", "othernum"),
+                                        },
+                                        new InlineKeyboardButton[]
+                                        {
+                                            InlineKeyboardButton.WithCallbackData("Отменить", "cancel")
+                                        } 
+                                    });
+                                await bot.SendMessage(chatId, $"{planIndex}. {planList[planIndex - 1].TextPlan}", 
+                                    cancellationToken: token, replyMarkup: inlineKeyboard);
+
+                                return;
+                            }
+                            else
+                            {
+                                await bot.SendMessage(chatId, "Неправильный формат. Попробуй снова отправить номер.", cancellationToken: token);
+                                return;
+                            }
+                        }
+
+                        if (messageText.StartsWith("/")) // работа с командами
+                        {
+                            await HandleCommandAsync(bot, chatId, messageText, token);
+                        }
+                        else
+                        {
+                            await bot.SendMessage(chatId, $"К сожалению, я не смогу поддержать диалог с тобой :(", cancellationToken: token);
+                        }
+
                         return;
                     }
-                    else
+                case UpdateType.CallbackQuery:
                     {
-                        await bot.SendMessage(chatId, $"Произошла ошибка, план не сохранен. Попробуйте использовать команду заново.", cancellationToken: token);
-                        userPlanState.Remove(chatId);
+                        var callbackQuery = update.CallbackQuery;
+                        var user = callbackQuery.From;
+
+                        Console.WriteLine($"[LOG] {user.Username} ({user.Id}) нажал на кнопку: {callbackQuery.Data}");
+
+                        long chatId = callbackQuery.Message.Chat.Id;
+
+                        switch(callbackQuery.Data)
+                        {
+                            case "deleteplan":
+                                {
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+
+                                    var planList = userActivePlans[chatId];
+                                    int planIndex = int.Parse(callbackQuery.Message.Text.Split('.')[0]);
+                                    var planToDelete = planList[planIndex - 1];
+
+                                    if (DeletePlan(chatId, planToDelete))
+                                    {
+                                        await bot.SendMessage(chatId, $"✅ План удален.", cancellationToken: token);
+                                        waitingForPlanDeletion.Remove(chatId);
+                                        userActivePlans.Remove(chatId);
+
+                                        return;
+                                    }
+                                    else
+                                    {
+                                        await bot.SendMessage(chatId, $"Произошла ошибка, план не удален. Попробуйте использовать команду заново.", cancellationToken: token);
+                                        userPlanState.Remove(chatId);
+                                        return;
+                                    }
+                                }
+                            case "othernum":
+                                {
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+
+                                    await bot.SendMessage(chatId, $"✏ Введите новый номер плана для удаления:", cancellationToken: token);
+
+                                    return;
+                                }
+                            case "cancel":
+                                {
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+                                    waitingForPlanDeletion.Remove(chatId);
+                                    userActivePlans.Remove(chatId);
+
+                                    await bot.SendMessage(chatId, $"Операция удаления отменена.", cancellationToken: token);
+
+                                    return;
+                                }
+                        }
                         return;
                     }
-                }
-                else
-                {
-                    await bot.SendMessage(chatId, "Неправильный формат даты. Попробуй снова в формате дд.мм.гггг 14:30", cancellationToken: token);
-                    return;
-                }
             }
         }
-        if (waitingForPlanDeletion.TryGetValue(chatId, out bool waiting) && waiting)
+        catch (Exception ex) 
         {
-            if (int.TryParse(messageText, out int planIndex) && planIndex > 0 && userActivePlans.TryGetValue(chatId, out var planList) && planIndex <= planList.Count())
-            {
-                var planToDelete = planList[planIndex - 1];
-                if (DeletePlan(chatId, planToDelete))
-                {
-                    await bot.SendMessage(chatId, $"✅ План удален.", cancellationToken: token);
-                    waitingForPlanDeletion.Remove(chatId);
-                    userActivePlans.Remove(chatId);
+            Console.WriteLine(ex.ToString());
+        }
+        
+        
 
-                    return;
-                }
-                else
-                {
-                    await bot.SendMessage(chatId, $"Произошла ошибка, план не удален. Попробуйте использовать команду заново.", cancellationToken: token);
-                    userPlanState.Remove(chatId);
-                    return;
-                }
-            }
-            else
-            {
-                await bot.SendMessage(chatId, "Неправильный формат. Попробуй снова отправить номер.", cancellationToken: token);
-                return;
-            }
-        }
-
-        if (messageText.StartsWith("/")) // работа с командами
-        {
-            await HandleCommandAsync(bot, chatId, messageText, token);
-        }
-        else
-        {
-            await bot.SendMessage(chatId, $"К сожалению, я не смогу поддержать диалог с тобой :(", cancellationToken: token);
-        }
+        
     }
 
     static async Task HandleCommandAsync(ITelegramBotClient bot, long chatId, string command, CancellationToken token)
