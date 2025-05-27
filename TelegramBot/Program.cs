@@ -13,7 +13,7 @@ class Program
     private static Dictionary<long, bool> waitingForPlanDeletion = new(); // Хранит статус ожидания номера плана
     private static Dictionary<long, List<Plan>> userActivePlans = new();  // Хранит список активных планов
 
-    static async Task Main()
+    static void Main()
     {
         string botToken = GetTokenFromFile();
         TelegramBotClient botClient = new TelegramBotClient(botToken);
@@ -77,7 +77,7 @@ class Program
                                         await bot.SendMessage(chatId, $"✅ План сохранен: {state.text} на {planDateTime}", cancellationToken: token);
                                         userPlanState.Remove(chatId);
 
-                                        await Reminder(bot); // добавить напоминание 
+                                        await Reminder(bot, token); // добавить напоминание 
                                         return;
                                     }
                                     else
@@ -150,7 +150,7 @@ class Program
                         {
                             case "deleteplan":
                                 {
-                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id, cancellationToken: token);
 
                                     var planList = userActivePlans[chatId];
                                     int planIndex = int.Parse(callbackQuery.Message.Text.Split('.')[0]);
@@ -173,7 +173,7 @@ class Program
                                 }
                             case "othernum":
                                 {
-                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id, cancellationToken: token);
 
                                     await bot.SendMessage(chatId, $"✏ Введите новый номер плана для удаления:", cancellationToken: token);
 
@@ -181,7 +181,7 @@ class Program
                                 }
                             case "cancel":
                                 {
-                                    await bot.AnswerCallbackQuery(callbackQuery.Id);
+                                    await bot.AnswerCallbackQuery(callbackQuery.Id, cancellationToken: token);
                                     waitingForPlanDeletion.Remove(chatId);
                                     userActivePlans.Remove(chatId);
 
@@ -356,10 +356,35 @@ class Program
         }
     }
 
-    static async Task Reminder(ITelegramBotClient bot) 
+    static async Task Reminder(ITelegramBotClient bot, CancellationToken token) 
     {
+        while (true)
+        {
+            using NpgsqlConnection conn = new(GetConnectionString());
+            conn.Open();
+            NpgsqlCommand cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT user_id, plan_text FROM plans WHERE plan_date = date_trunc('minute', NOW());";
 
-        await Task.Delay(TimeSpan.FromMinutes(1));
+            NpgsqlDataReader reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                long chatId = reader.GetInt64(0);
+                string planText = reader.GetString(1);
+
+                var imageUrl = "https://cataas.com/cat"; // случайный котик
+
+                using var httpClient = new HttpClient();
+                var imageStream = await httpClient.GetStreamAsync(imageUrl);
+
+                await bot.SendPhoto(
+                    chatId: chatId,
+                    photo: new InputFileStream(imageStream, "cat.jpg"),
+                    caption: $"🔔 Напоминание: {planText} 🐱",
+                    cancellationToken: token
+                );
+            }
+            await Task.Delay(TimeSpan.FromMinutes(1), token); // Проверяем каждые 60 сек
+        }
     }
 
     static Task HandleErrorAsync(ITelegramBotClient bot, Exception exception, CancellationToken token)
